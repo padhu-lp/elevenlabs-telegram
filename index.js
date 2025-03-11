@@ -13,14 +13,25 @@ const app = express();
 // Raw body logging middleware - add this before JSON parsing
 app.use((req, res, next) => {
     if (req.originalUrl.includes('webhook')) {
+        console.log('Request headers:', req.headers);
+        console.log('Request method:', req.method);
+        console.log('Request URL:', req.originalUrl);
+
         let rawData = '';
         req.on('data', chunk => {
             rawData += chunk;
+            console.log('Chunk received:', chunk.toString());
         });
 
         req.on('end', () => {
-            console.log('Raw webhook data received:', rawData);
-            // Continue with normal Express parsing
+            console.log('Raw webhook data complete:', rawData);
+            try {
+                // Try parsing as JSON manually to debug
+                const jsonData = JSON.parse(rawData);
+                console.log('Successfully parsed as JSON:', jsonData);
+            } catch (e) {
+                console.log('Failed to parse as JSON:', e.message);
+            }
             next();
         });
     } else {
@@ -28,8 +39,11 @@ app.use((req, res, next) => {
     }
 });
 
-// Regular middleware
-app.use(express.json());
+// Support multiple formats and larger payloads
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(express.text({ limit: '10mb' }));
+app.use(express.raw({ type: '*/*', limit: '10mb' }));
 
 // Function to send message to Telegram with improved error handling
 async function sendToTelegram(message) {
@@ -142,42 +156,58 @@ app.get('/test-telegram', async (req, res) => {
     }
 });
 
-// Set up ElevenLabs webhook endpoint - updated to be more flexible
+// Simplest possible webhook endpoint - just logs and returns 200
 app.post('/elevenlabs-webhook', async (req, res) => {
+    console.log('======= WEBHOOK RECEIVED =======');
+    console.log('Headers:', JSON.stringify(req.headers));
+
     try {
-        console.log('Received webhook from ElevenLabs with body:', JSON.stringify(req.body));
-        console.log('Headers:', JSON.stringify(req.headers));
+        let bodyData = req.body;
+
+        // Try to parse the body if it's a string or buffer
+        if (typeof req.body === 'string' || Buffer.isBuffer(req.body)) {
+            try {
+                bodyData = JSON.parse(req.body.toString());
+                console.log('Successfully parsed string/buffer body as JSON');
+            } catch (e) {
+                console.log('Body is not JSON format:', req.body.toString());
+                // Just use the raw string as text
+                bodyData = { text: req.body.toString() };
+            }
+        }
+
+        console.log('Processed body data:', JSON.stringify(bodyData));
 
         // Get text from different possible locations in the payload
         let text = null;
         let audioUrl = null;
 
         // Try to extract text and audioUrl from different possible structures
-        if (req.body) {
+        if (bodyData) {
             // Direct properties
-            if (req.body.text) {
-                text = req.body.text;
+            if (bodyData.text) {
+                text = bodyData.text;
             }
-            if (req.body.audioUrl || req.body.audio_url || req.body.url) {
-                audioUrl = req.body.audioUrl || req.body.audio_url || req.body.url;
+            if (bodyData.audioUrl || bodyData.audio_url || bodyData.url) {
+                audioUrl = bodyData.audioUrl || bodyData.audio_url || bodyData.url;
             }
 
             // Check for nested properties
-            if (req.body.data) {
-                if (req.body.data.text) {
-                    text = req.body.data.text;
+            if (bodyData.data) {
+                if (bodyData.data.text) {
+                    text = bodyData.data.text;
                 }
-                if (req.body.data.audioUrl || req.body.data.audio_url || req.body.data.url) {
-                    audioUrl = req.body.data.audioUrl || req.body.data.audio_url || req.body.data.url;
+                if (bodyData.data.audioUrl || bodyData.data.audio_url || bodyData.data.url) {
+                    audioUrl = bodyData.data.audioUrl || bodyData.data.audio_url || bodyData.data.url;
                 }
             }
 
             // Check for message or content properties
-            if (req.body.message) {
-                text = req.body.message;
+            if (bodyData.message) {
+                text = bodyData.message;
             }
-            if (req.body.content) {
-                text = req.body.content;
+            if (bodyData.content) {
+                text = bodyData.content;
             }
         }
 
@@ -211,19 +241,17 @@ app.post('/elevenlabs-webhook', async (req, res) => {
             }
         }
 
-        if (success) {
-            res.status(200).send('Message forwarded to Telegram');
-        } else {
-            res.status(200).send('Received webhook but could not process data');
-        }
+        // Always return 200 to prevent retries
+        res.status(200).send('Webhook received and processed');
     } catch (error) {
-        console.error('Error processing webhook:', error);
-        // Still return 200 to prevent ElevenLabs from retrying
-        res.status(200).send('Error processing webhook');
+        console.error('CRITICAL ERROR in webhook processing:', error);
+        console.error('Error stack:', error.stack);
+        // Always return 200 even when encountering errors
+        res.status(200).send('Webhook received with errors');
     }
 });
 
-// Alternative endpoint (in case ElevenLabs is using a different URL format)
+// Alternative endpoint for hyphen vs underscore
 app.post('/elevenlabs_webhook', async (req, res) => {
     console.log('Received webhook on elevenlabs_webhook endpoint');
     // Simply forward to the main handler
