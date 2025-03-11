@@ -7,6 +7,30 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 
+// Create Express server
+const app = express();
+
+// Raw body logging middleware - add this before JSON parsing
+app.use((req, res, next) => {
+    if (req.originalUrl.includes('webhook')) {
+        let rawData = '';
+        req.on('data', chunk => {
+            rawData += chunk;
+        });
+
+        req.on('end', () => {
+            console.log('Raw webhook data received:', rawData);
+            // Continue with normal Express parsing
+            next();
+        });
+    } else {
+        next();
+    }
+});
+
+// Regular middleware
+app.use(express.json());
+
 // Function to send message to Telegram with improved error handling
 async function sendToTelegram(message) {
     const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
@@ -93,10 +117,6 @@ async function sendAudioToTelegram(audioUrl) {
     }
 }
 
-// Create Express server
-const app = express();
-app.use(express.json());
-
 // Health check endpoint
 app.get('/', (req, res) => {
     // Also log environment variable status (masked for security)
@@ -122,13 +142,54 @@ app.get('/test-telegram', async (req, res) => {
     }
 });
 
-// Set up ElevenLabs webhook endpoint
+// Set up ElevenLabs webhook endpoint - updated to be more flexible
 app.post('/elevenlabs-webhook', async (req, res) => {
     try {
-        console.log('Received webhook from ElevenLabs:', JSON.stringify(req.body));
+        console.log('Received webhook from ElevenLabs with body:', JSON.stringify(req.body));
+        console.log('Headers:', JSON.stringify(req.headers));
 
-        const { text, audioUrl } = req.body;
+        // Get text from different possible locations in the payload
+        let text = null;
+        let audioUrl = null;
+
+        // Try to extract text and audioUrl from different possible structures
+        if (req.body) {
+            // Direct properties
+            if (req.body.text) {
+                text = req.body.text;
+            }
+            if (req.body.audioUrl || req.body.audio_url || req.body.url) {
+                audioUrl = req.body.audioUrl || req.body.audio_url || req.body.url;
+            }
+
+            // Check for nested properties
+            if (req.body.data) {
+                if (req.body.data.text) {
+                    text = req.body.data.text;
+                }
+                if (req.body.data.audioUrl || req.body.data.audio_url || req.body.data.url) {
+                    audioUrl = req.body.data.audioUrl || req.body.data.audio_url || req.body.data.url;
+                }
+            }
+
+            // Check for message or content properties
+            if (req.body.message) {
+                text = req.body.message;
+            }
+            if (req.body.content) {
+                text = req.body.content;
+            }
+        }
+
+        console.log('Extracted text:', text);
+        console.log('Extracted audioUrl:', audioUrl);
+
         let success = false;
+
+        // Send a default message if nothing could be extracted
+        if (!text && !audioUrl) {
+            text = "New content generated in ElevenLabs";
+        }
 
         // Send the text message
         if (text) {
@@ -153,12 +214,21 @@ app.post('/elevenlabs-webhook', async (req, res) => {
         if (success) {
             res.status(200).send('Message forwarded to Telegram');
         } else {
-            res.status(500).send('Failed to forward message to Telegram');
+            res.status(200).send('Received webhook but could not process data');
         }
     } catch (error) {
         console.error('Error processing webhook:', error);
-        res.status(500).send('Error processing webhook');
+        // Still return 200 to prevent ElevenLabs from retrying
+        res.status(200).send('Error processing webhook');
     }
+});
+
+// Alternative endpoint (in case ElevenLabs is using a different URL format)
+app.post('/elevenlabs_webhook', async (req, res) => {
+    console.log('Received webhook on elevenlabs_webhook endpoint');
+    // Simply forward to the main handler
+    req.url = '/elevenlabs-webhook';
+    app._router.handle(req, res);
 });
 
 // Start the server
